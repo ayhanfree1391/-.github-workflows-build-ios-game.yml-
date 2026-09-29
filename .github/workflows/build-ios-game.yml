@@ -1,0 +1,258 @@
+name: macOS RDP Session
+
+on:
+  workflow_dispatch:
+    inputs:
+      session_timeout:
+        description: 'Session timeout (minutes, max 350)'
+        required: true
+        default: '60'
+      vnc_password:
+        description: 'Password (max 8 chars)'
+        required: true
+        default: 'MacRDP12'
+      xcode_version:
+        description: 'Xcode version'
+        required: true
+        default: '15.4'
+
+jobs:
+  macos-rdp:
+    runs-on: macos-14
+    timeout-minutes: 360
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      # ═══════════════════════════════════════════
+      # 1️⃣ نصب Xcode
+      # ═══════════════════════════════════════════
+      - name: 🍎 Setup Xcode ${{ inputs.xcode_version }}
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: ${{ inputs.xcode_version }}
+      
+      - name: ✅ Accept Xcode license
+        run: |
+          sudo xcodebuild -license accept
+          sudo xcodebuild -runFirstLaunch
+          xcodebuild -version
+      
+      # ═══════════════════════════════════════════
+      # 2️⃣ فعال‌سازی VNC Server (macOS native)
+      # ═══════════════════════════════════════════
+      - name: 🖥️ Enable ARD (Apple Remote Desktop)
+        run: |
+          echo "=== Enabling Remote Management ==="
+          
+          # فعال‌سازی کامل ARD
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate -configure -access -on \
+            -configure -allowAccessFor -allUsers \
+            -configure -restrictByHost -off \
+            -restart -agent -menu -privs -all
+          
+          # تنظیم رمز VNC
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -configure -clientopts \
+            -setvnclegacy -vnclegacy yes \
+            -setvncpw -vncpw "${{ inputs.vnc_password }}" \
+            -restart -agent
+          
+          echo "✅ ARD enabled"
+      
+      - name: 🔥 Disable firewall
+        run: |
+          sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate off
+          echo "✅ Firewall disabled"
+      
+      - name: ✅ Verify VNC listening
+        run: |
+          sleep 3
+          echo "=== Port 5900 status ==="
+          sudo lsof -i :5900 || echo "⚠️ Not listening yet"
+          echo ""
+          netstat -an | grep 5900 || true
+      
+      # ═══════════════════════════════════════════
+      # 3️⃣ نصب ngrok
+      # ═══════════════════════════════════════════
+      - name: 📦 Install ngrok
+        run: |
+          brew install ngrok/ngrok/ngrok || \
+          (curl -sL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-darwin-amd64.zip -o /tmp/ngrok.zip && \
+           unzip -o /tmp/ngrok.zip -d /tmp && \
+           sudo mv /tmp/ngrok /usr/local/bin/)
+          ngrok version
+      
+      - name: 🔐 Configure ngrok
+        env:
+          NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
+        run: |
+          ngrok config add-authtoken $NGROK_AUTHTOKEN
+          echo "✅ ngrok configured"
+      
+      # ═══════════════════════════════════════════
+      # 4️⃣ شروع تونل ngrok
+      # ═══════════════════════════════════════════
+      - name: 🌐 Start ngrok tunnel
+        run: |
+          echo "=== Starting ngrok TCP tunnel on 5900 ==="
+          ngrok tcp 5900 --log=stdout > /tmp/ngrok.log 2>&1 &
+          
+          # منتظر بمان
+          for i in {1..40}; do
+            if curl -s http://localhost:4040/api/tunnels 2>/dev/null | grep -q "tcp://"; then
+              echo "✅ Tunnel ready after $((i*2))s"
+              break
+            fi
+            sleep 2
+          done
+          
+          TUNNEL=$(curl -s http://localhost:4040/api/tunnels)
+          PUBLIC_URL=$(echo "$TUNNEL" | jq -r '.tunnels[0].public_url')
+          HOST_PORT=$(echo "$PUBLIC_URL" | sed 's|tcp://||')
+          HOST=$(echo "$HOST_PORT" | cut -d: -f1)
+          PORT=$(echo "$HOST_PORT" | cut -d: -f2)
+          
+          echo "HOST=$HOST" >> $GITHUB_ENV
+          echo "PORT=$PORT" >> $GITHUB_ENV
+          
+          # ═══ Summary بزرگ و واضح ═══
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          # 🖥️ macOS RDP Session Active
+          
+          ## 🔗 Connection Details
+          
+          | Setting | Value |
+          |---------|-------|
+          | 🌐 **Host** | \`$HOST\` |
+          | 🔌 **Port** | \`$PORT\` |
+          | 🔑 **Password** | \`${{ inputs.vnc_password }}\` |
+          | 🍎 **Xcode** | ${{ inputs.xcode_version }} |
+          | ⏱️ **Timeout** | ${{ inputs.session_timeout }} min |
+          
+          ---
+          
+          ## 📱 روش اتصال
+          
+          ### 🪟 Windows - Microsoft RDP Client (توصیه می‌شه!)
+          \`\`\`
+          1. Microsoft Remote Desktop رو باز کن
+          2. Add PC → VNC
+          3. PC name: $HOST:$PORT
+          4. Password: ${{ inputs.vnc_password }}
+          \`\`\`
+          
+          ### 🍎 macOS
+          \`\`\`
+          open vnc://$HOST:$PORT
+          \`\`\`
+          یا از Finder → ⌘K → \`vnc://$HOST:$PORT\`
+          
+          ### 🐧 Linux
+          \`\`\`bash
+          sudo apt install remmina
+          remmina -c vnc://$HOST:$PORT
+          \`\`\`
+          
+          ### 📱 iOS / Android
+          App: **RealVNC Viewer** یا **VNC Viewer**
+          - Address: \`$HOST:$PORT\`
+          - Password: \`${{ inputs.vnc_password }}\`
+          
+          ---
+          
+          ## 🎯 چیزهای آماده در Session
+          
+          - ✅ Xcode ${{ inputs.xcode_version }}
+          - ✅ Command Line Tools
+          - ✅ Homebrew
+          - ✅ Terminal access
+          - ✅ Finder
+          - ✅ Safari
+          
+          ## 💡 دستورات مفید بعد از اتصال
+          
+          \`\`\`bash
+          # باز کردن Xcode
+          open -a Xcode
+          
+          # ساخت پروژه سریع
+          cd ~/Desktop
+          mkdir MyApp && cd MyApp
+          # ... کد خودت رو بنویس
+          
+          # Build برای IPA
+          xcodebuild archive -scheme MyApp \\
+            -archivePath ./build/MyApp.xcarchive
+          \`\`\`
+          
+          EOF
+          
+          echo "════════════════════════════════"
+          echo "🎯 RDP/VNC READY"
+          echo "Host: $HOST"
+          echo "Port: $PORT"
+          echo "Pass: ${{ inputs.vnc_password }}"
+          echo "════════════════════════════════"
+      
+      # ═══════════════════════════════════════════
+      # 5️⃣ زنده نگه‌داشتن Session
+      # ═══════════════════════════════════════════
+      - name: ⏳ Keep session alive
+        run: |
+          MINUTES=${{ inputs.session_timeout }}
+          echo "🕐 Started: $(date)"
+          echo "⏱️ Will run for $MINUTES minutes"
+          
+          for i in $(seq 1 $MINUTES); do
+            printf "[%03d/%03d] %s" "$i" "$MINUTES" "$(date '+%H:%M:%S')"
+            
+            # چک سلامت ngrok هر ۱۰ دقیقه
+            if [ $((i % 10)) -eq 0 ]; then
+              if ! curl -s http://localhost:4040/api/tunnels 2>/dev/null | grep -q "tcp://"; then
+                echo " ⚠️ Restarting ngrok..."
+                pkill ngrok || true
+                sleep 3
+                ngrok tcp 5900 --log=stdout > /tmp/ngrok.log 2>&1 &
+                sleep 10
+                NEW_URL=$(curl -s http://localhost:4040/api/tunnels | jq -r '.tunnels[0].public_url')
+                echo "🔄 New tunnel: $NEW_URL"
+              else
+                echo " ✅"
+              fi
+            else
+              echo ""
+            fi
+            
+            sleep 60
+          done
+          
+          echo "⏰ Session ended: $(date)"
+      
+      # ═══════════════════════════════════════════
+      # 6️⃣ آپلود فایل‌های ساخته‌شده
+      # ═══════════════════════════════════════════
+      - name: 📤 Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: macos-build-output
+          path: |
+            ~/build/**/*.ipa
+            ~/Desktop/**/*.ipa
+            /tmp/**/*.ipa
+            ~/Library/Developer/Xcode/Archives/**/*.xcarchive
+          retention-days: 7
+          if-no-files-found: ignore
+      
+      # ═══════════════════════════════════════════
+      # 7️⃣ Cleanup
+      # ═══════════════════════════════════════════
+      - name: 🧹 Cleanup
+        if: always()
+        run: |
+          pkill ngrok || true
+          echo "✅ Cleanup done"
