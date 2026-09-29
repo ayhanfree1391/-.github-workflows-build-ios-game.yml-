@@ -1,4 +1,4 @@
-name: 🖥️ macOS VNC Session
+name: 🖥️ macOS VNC via Tailscale
 
 on:
   workflow_dispatch:
@@ -18,18 +18,7 @@ jobs:
     timeout-minutes: 360
     
     steps:
-      # ═══ 1. Verify Secret ═══
-      - name: 🔐 Verify secret
-        env:
-          NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
-        run: |
-          if [ -z "$NGROK_AUTHTOKEN" ]; then
-            echo "❌ NGROK_AUTHTOKEN not set!"
-            exit 1
-          fi
-          echo "✅ Token OK (length: ${#NGROK_AUTHTOKEN})"
-      
-      # ═══ 2. Enable VNC ═══
+      # ═══ 1. Enable VNC ═══
       - name: 🖥️ Enable VNC
         run: |
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
@@ -44,107 +33,99 @@ jobs:
             -restart -agent 2>&1 || true
           
           sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate off 2>&1 || true
-          
           sleep 2
           echo "✅ VNC enabled"
       
-      # ═══ 3. Install ngrok ═══
-      - name: 📦 Install ngrok
-        run: |
-          curl -sSL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-darwin-amd64.zip -o /tmp/ngrok.zip
-          unzip -o -q /tmp/ngrok.zip -d /tmp
-          sudo mv /tmp/ngrok /usr/local/bin/
-          sudo chmod +x /usr/local/bin/ngrok
-          ngrok version
+      # ═══ 2. Setup Tailscale ═══
+      - name: 🌐 Setup Tailscale
+        uses: tailscale/github-action@v2
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          version: latest
       
-      # ═══ 4. Configure ngrok (FIXED) ═══
-      - name: 🔐 Configure ngrok
-        env:
-          NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
+      # ═══ 3. Get Tailscale IP ═══
+      - name: 🔗 Show connection info
         run: |
-          # روش رسمی — خود ngrok مسیر درست رو می‌سازه
-          ngrok config add-authtoken "$NGROK_AUTHTOKEN"
+          sleep 5
           
-          echo "═══════════════════════════════"
-          echo "✅ Authtoken configured"
-          echo "═══════════════════════════════"
+          IP=$(tailscale ip -4)
+          HOSTNAME=$(tailscale status --json | jq -r '.Self.HostName')
           
-          # نمایش مسیر config
-          find ~/Library -name "ngrok.yml" 2>/dev/null | head -3
-      
-      # ═══ 5. Start ngrok ═══
-      - name: 🌐 Start ngrok tunnel
-        id: ngrok
-        run: |
-          echo "=== Starting ngrok ==="
-          nohup ngrok tcp 5900 --log=/tmp/ngrok.log > /dev/null 2>&1 &
-          echo $! > /tmp/ngrok.pid
-          
-          for i in $(seq 1 30); do
-            sleep 1
-            if curl -s http://localhost:4040/api/tunnels 2>/dev/null | grep -q "tcp://"; then
-              echo "✅ ngrok ready in ${i}s"
-              break
-            fi
-            if [ $i -eq 30 ]; then
-              echo "❌ ngrok failed"
-              echo "═══════════════════════════════"
-              cat /tmp/ngrok.log
-              echo "═══════════════════════════════"
-              exit 1
-            fi
-          done
-          
-          TUNNEL=$(curl -s http://localhost:4040/api/tunnels)
-          PUBLIC_URL=$(echo "$TUNNEL" | jq -r '.tunnels[0].public_url')
-          HOST_PORT=$(echo "$PUBLIC_URL" | sed 's|tcp://||')
-          HOST=$(echo "$HOST_PORT" | cut -d: -f1)
-          PORT=$(echo "$HOST_PORT" | cut -d: -f2)
-          
-          echo "host=$HOST" >> $GITHUB_OUTPUT
-          echo "port=$PORT" >> $GITHUB_OUTPUT
-          
-          echo "═══════════════════════════════"
+          echo "═══════════════════════════════════"
           echo "🎯 VNC READY"
-          echo "🌐 Host: $HOST"
-          echo "🔌 Port: $PORT"
-          echo "🔑 Pass: ${{ inputs.vnc_password }}"
-          echo "═══════════════════════════════"
+          echo "═══════════════════════════════════"
+          echo "🌐 Tailscale IP: $IP"
+          echo "🖥️ Hostname: $HOSTNAME"
+          echo "🔌 VNC Port: 5900"
+          echo "🔑 Password: ${{ inputs.vnc_password }}"
+          echo "═══════════════════════════════════"
+          echo ""
+          echo "📱 Connect from your device:"
+          echo "   1. Install Tailscale on your device"
+          echo "   2. Login to same account"
+          echo "   3. Run: open vnc://$IP:5900"
+          echo "═══════════════════════════════════"
           
           cat >> $GITHUB_STEP_SUMMARY << EOF
-          # 🖥️ macOS VNC Ready
+          # 🖥️ macOS VNC via Tailscale
+          
+          ## 🔗 Connection Info
           
           | | |
           |---|---|
-          | 🌐 **Host** | \`$HOST\` |
-          | 🔌 **Port** | \`$PORT\` |
+          | 🌐 **Tailscale IP** | \`$IP\` |
+          | 🖥️ **Hostname** | \`$HOSTNAME\` |
+          | 🔌 **VNC Port** | \`5900\` |
           | 🔑 **Password** | \`${{ inputs.vnc_password }}\` |
           
-          ## 📱 Connect
+          ## 📱 Setup on Your Device
           
+          ### 1. Install Tailscale
+          - macOS: https://tailscale.com/download/mac
+          - Windows: https://tailscale.com/download/windows
+          - iOS: App Store → Tailscale
+          - Android: Play Store → Tailscale
+          
+          ### 2. Login to Same Account
+          Use same Tailscale account
+          
+          ### 3. Connect via VNC
+          
+          **macOS:**
           \`\`\`
-          open vnc://$HOST:$PORT
+          open vnc://$IP:5900
           \`\`\`
+          
+          **Windows (RealVNC / MS RDP):**
+          \`\`\`
+          $IP:5900
+          \`\`\`
+          
+          **Linux:**
+          \`\`\`bash
+          remmina -c vnc://$IP:5900
+          \`\`\`
+          
+          ## ⏱️ Timeout
+          ${{ inputs.timeout }} minutes
+          
+          ## 📝 Info
+          - Started: $(date -u '+%Y-%m-%d %H:%M UTC')
           EOF
       
-      # ═══ 6. Keep alive ═══
+      # ═══ 4. Keep alive ═══
       - name: ⏳ Keep session alive
         run: |
+          IP=$(tailscale ip -4)
           for i in $(seq 1 ${{ inputs.timeout }}); do
-            if [ $((i % 5)) -eq 0 ]; then
-              if ! curl -s http://localhost:4040/api/tunnels 2>/dev/null | grep -q "tcp://"; then
-                echo "⚠️ ngrok restarting..."
-                nohup ngrok tcp 5900 --log=/tmp/ngrok.log > /dev/null 2>&1 &
-                sleep 10
-              fi
-            fi
-            echo "[$i/${{ inputs.timeout }}] $(date '+%H:%M:%S')"
+            echo "[$i/${{ inputs.timeout }}] $(date '+%H:%M:%S') - IP: $IP"
             sleep 60
           done
       
-      # ═══ 7. Cleanup ═══
+      # ═══ 5. Cleanup ═══
       - name: 🧹 Cleanup
         if: always()
         run: |
-          pkill ngrok 2>/dev/null || true
           echo "✅ Done"
