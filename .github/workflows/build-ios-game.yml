@@ -34,40 +34,45 @@ jobs:
           
           sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate off 2>&1 || true
           sleep 2
-          echo "✅ VNC enabled on port 5900"
+          echo "✅ VNC enabled"
       
-      # ═══ 2. Install noVNC + websockify ═══
+      # ═══ 2. Install noVNC + websockify (venv) ═══
       - name: 📦 Install noVNC
         run: |
           echo "=== Installing noVNC ==="
           
           # noVNC
           git clone --depth=1 https://github.com/novnc/noVNC.git /tmp/novnc
+          echo "✅ noVNC cloned"
           
-          # websockify
-          brew install websockify || pip3 install websockify
+          # websockify در virtualenv
+          python3 -m venv /tmp/wsvenv
+          /tmp/wsvenv/bin/pip install --quiet websockify
           
-          # چک
-          ls /tmp/novnc/vnc.html
-          which websockify
-          echo "✅ noVNC installed"
+          echo "✅ websockify installed"
+          /tmp/wsvenv/bin/websockify --help 2>&1 | head -3
       
-      # ═══ 3. Start websockify proxy ═══
+      # ═══ 3. Start websockify ═══
       - name: 🌐 Start websockify
         run: |
           echo "=== Starting websockify proxy ==="
           
-          # websockify: WebSocket → TCP (VNC)
-          nohup websockify --web=/tmp/novnc 6080 localhost:5900 \
+          nohup /tmp/wsvenv/bin/websockify --web=/tmp/novnc 6080 localhost:5900 \
             > /tmp/websockify.log 2>&1 &
           echo $! > /tmp/websockify.pid
           
           sleep 5
           
           # چک
-          if curl -s http://localhost:6080/vnc.html | grep -q "noVNC"; then
-            echo "✅ websockify running on port 6080"
-          else
+          for i in {1..10}; do
+            if curl -s http://localhost:6080/vnc.html 2>/dev/null | grep -q "noVNC"; then
+              echo "✅ websockify running on port 6080"
+              break
+            fi
+            sleep 2
+          done
+          
+          if ! curl -s http://localhost:6080/vnc.html | grep -q "noVNC"; then
             echo "❌ websockify failed"
             cat /tmp/websockify.log
             exit 1
@@ -78,9 +83,9 @@ jobs:
         run: |
           echo "=== Installing cloudflared ==="
           
-          # دانلود
+          # دانلود binary ARM64 (چون runner ARM64 هست)
           curl -L -o /tmp/cloudflared.tgz \
-            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-amd64.tgz
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-arm64.tgz
           
           tar -xzf /tmp/cloudflared.tgz -C /tmp
           sudo mv /tmp/cloudflared /usr/local/bin/
@@ -91,6 +96,7 @@ jobs:
       
       # ═══ 5. Start Cloudflare Tunnel ═══
       - name: 🌐 Start Cloudflare Tunnel
+        id: tunnel
         run: |
           echo "=== Starting Cloudflare tunnel ==="
           
@@ -99,7 +105,6 @@ jobs:
             > /tmp/cloudflared.log 2>&1 &
           echo $! > /tmp/cf.pid
           
-          # منتظر URL
           URL=""
           for i in $(seq 1 40); do
             sleep 2
@@ -123,25 +128,22 @@ jobs:
           
           VNC_URL="${URL}/vnc.html?autoconnect=true&password=${{ inputs.vnc_password }}&resize=scale"
           
-          echo "═══════════════════════════════════════════════════"
-          echo "🎯 VNC READY - Open in browser!"
-          echo "═══════════════════════════════════════════════════"
           echo ""
+          echo "═══════════════════════════════════════════════════"
+          echo "🎯 VNC READY"
+          echo "═══════════════════════════════════════════════════"
           echo "🌐 URL:"
           echo "$VNC_URL"
           echo ""
           echo "🔑 Password: ${{ inputs.vnc_password }}"
-          echo ""
           echo "═══════════════════════════════════════════════════"
           
-          # Summary
           cat >> $GITHUB_STEP_SUMMARY << EOF
           # 🖥️ macOS VNC Ready
           
           ## 🎉 **[👉 Click Here to Connect]($VNC_URL)**
           
-          Or copy this URL to any browser:
-          
+          Or copy this URL:
           \`\`\`
           $VNC_URL
           \`\`\`
@@ -150,41 +152,17 @@ jobs:
           \`${{ inputs.vnc_password }}\`
           
           ## 📱 Works On
-          - 💻 Desktop (Chrome, Firefox, Safari, Edge)
+          - 💻 Desktop (Chrome, Firefox, Safari)
           - 📱 Mobile (iOS Safari, Android Chrome)
-          - 📟 Tablet
           
           ## ⏱️ Timeout
           ${{ inputs.timeout }} minutes
-          
-          ## 💡 Tips
-          - Wait 10-20 seconds after clicking for full load
-          - If prompt for password, enter: \`${{ inputs.vnc_password }}\`
-          - For better experience, use Chrome
-          - Press Ctrl+Alt+Shift for special keys
-          
-          ## 🎯 What's Ready
-          - ✅ macOS Sonoma 14
-          - ✅ Xcode (pre-installed)
-          - ✅ Terminal, Safari, Finder
-          - ✅ Full GUI access
-          
           EOF
       
       # ═══ 6. Keep alive ═══
       - name: ⏳ Keep session alive
         run: |
           for i in $(seq 1 ${{ inputs.timeout }}); do
-            # چک سلامت tunnel هر ۱۰ دقیقه
-            if [ $((i % 10)) -eq 0 ]; then
-              if ! curl -s http://localhost:6080/vnc.html | grep -q "noVNC"; then
-                echo "⚠️ websockify died, restarting..."
-                nohup websockify --web=/tmp/novnc 6080 localhost:5900 \
-                  > /tmp/websockify.log 2>&1 &
-                sleep 5
-              fi
-            fi
-            
             echo "[$i/${{ inputs.timeout }}] $(date '+%H:%M:%S')"
             sleep 60
           done
@@ -194,6 +172,5 @@ jobs:
         if: always()
         run: |
           pkill cloudflared 2>/dev/null || true
-          pkill websockify 2>/dev/null || true
-          pkill python3 2>/dev/null || true
+          pkill -f websockify 2>/dev/null || true
           echo "✅ Done"
