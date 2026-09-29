@@ -1,4 +1,4 @@
-name: 🖥️ macOS VNC via Tailscale
+name: 🖥️ macOS VNC via Browser
 
 on:
   workflow_dispatch:
@@ -34,98 +34,166 @@ jobs:
           
           sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate off 2>&1 || true
           sleep 2
-          echo "✅ VNC enabled"
+          echo "✅ VNC enabled on port 5900"
       
-      # ═══ 2. Setup Tailscale ═══
-      - name: 🌐 Setup Tailscale
-        uses: tailscale/github-action@v2
-        with:
-          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
-          tags: tag:ci
-          version: latest
-      
-      # ═══ 3. Get Tailscale IP ═══
-      - name: 🔗 Show connection info
+      # ═══ 2. Install noVNC + websockify ═══
+      - name: 📦 Install noVNC
         run: |
+          echo "=== Installing noVNC ==="
+          
+          # noVNC
+          git clone --depth=1 https://github.com/novnc/noVNC.git /tmp/novnc
+          
+          # websockify
+          brew install websockify || pip3 install websockify
+          
+          # چک
+          ls /tmp/novnc/vnc.html
+          which websockify
+          echo "✅ noVNC installed"
+      
+      # ═══ 3. Start websockify proxy ═══
+      - name: 🌐 Start websockify
+        run: |
+          echo "=== Starting websockify proxy ==="
+          
+          # websockify: WebSocket → TCP (VNC)
+          nohup websockify --web=/tmp/novnc 6080 localhost:5900 \
+            > /tmp/websockify.log 2>&1 &
+          echo $! > /tmp/websockify.pid
+          
           sleep 5
           
-          IP=$(tailscale ip -4)
-          HOSTNAME=$(tailscale status --json | jq -r '.Self.HostName')
+          # چک
+          if curl -s http://localhost:6080/vnc.html | grep -q "noVNC"; then
+            echo "✅ websockify running on port 6080"
+          else
+            echo "❌ websockify failed"
+            cat /tmp/websockify.log
+            exit 1
+          fi
+      
+      # ═══ 4. Install cloudflared ═══
+      - name: 📦 Install cloudflared
+        run: |
+          echo "=== Installing cloudflared ==="
           
-          echo "═══════════════════════════════════"
-          echo "🎯 VNC READY"
-          echo "═══════════════════════════════════"
-          echo "🌐 Tailscale IP: $IP"
-          echo "🖥️ Hostname: $HOSTNAME"
-          echo "🔌 VNC Port: 5900"
-          echo "🔑 Password: ${{ inputs.vnc_password }}"
-          echo "═══════════════════════════════════"
+          # دانلود
+          curl -L -o /tmp/cloudflared.tgz \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-amd64.tgz
+          
+          tar -xzf /tmp/cloudflared.tgz -C /tmp
+          sudo mv /tmp/cloudflared /usr/local/bin/
+          sudo chmod +x /usr/local/bin/cloudflared
+          
+          cloudflared --version
+          echo "✅ cloudflared installed"
+      
+      # ═══ 5. Start Cloudflare Tunnel ═══
+      - name: 🌐 Start Cloudflare Tunnel
+        run: |
+          echo "=== Starting Cloudflare tunnel ==="
+          
+          nohup cloudflared tunnel --url http://localhost:6080 \
+            --no-autoupdate \
+            > /tmp/cloudflared.log 2>&1 &
+          echo $! > /tmp/cf.pid
+          
+          # منتظر URL
+          URL=""
+          for i in $(seq 1 40); do
+            sleep 2
+            URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/cloudflared.log | head -1)
+            if [ -n "$URL" ]; then
+              echo "✅ Tunnel ready: $URL"
+              break
+            fi
+            echo "⏳ Waiting... ($i/40)"
+          done
+          
+          if [ -z "$URL" ]; then
+            echo "❌ Failed to get tunnel URL"
+            echo "═══════════════════════════════"
+            cat /tmp/cloudflared.log
+            echo "═══════════════════════════════"
+            exit 1
+          fi
+          
+          echo "url=$URL" >> $GITHUB_OUTPUT
+          
+          VNC_URL="${URL}/vnc.html?autoconnect=true&password=${{ inputs.vnc_password }}&resize=scale"
+          
+          echo "═══════════════════════════════════════════════════"
+          echo "🎯 VNC READY - Open in browser!"
+          echo "═══════════════════════════════════════════════════"
           echo ""
-          echo "📱 Connect from your device:"
-          echo "   1. Install Tailscale on your device"
-          echo "   2. Login to same account"
-          echo "   3. Run: open vnc://$IP:5900"
-          echo "═══════════════════════════════════"
+          echo "🌐 URL:"
+          echo "$VNC_URL"
+          echo ""
+          echo "🔑 Password: ${{ inputs.vnc_password }}"
+          echo ""
+          echo "═══════════════════════════════════════════════════"
           
+          # Summary
           cat >> $GITHUB_STEP_SUMMARY << EOF
-          # 🖥️ macOS VNC via Tailscale
+          # 🖥️ macOS VNC Ready
           
-          ## 🔗 Connection Info
+          ## 🎉 **[👉 Click Here to Connect]($VNC_URL)**
           
-          | | |
-          |---|---|
-          | 🌐 **Tailscale IP** | \`$IP\` |
-          | 🖥️ **Hostname** | \`$HOSTNAME\` |
-          | 🔌 **VNC Port** | \`5900\` |
-          | 🔑 **Password** | \`${{ inputs.vnc_password }}\` |
+          Or copy this URL to any browser:
           
-          ## 📱 Setup on Your Device
-          
-          ### 1. Install Tailscale
-          - macOS: https://tailscale.com/download/mac
-          - Windows: https://tailscale.com/download/windows
-          - iOS: App Store → Tailscale
-          - Android: Play Store → Tailscale
-          
-          ### 2. Login to Same Account
-          Use same Tailscale account
-          
-          ### 3. Connect via VNC
-          
-          **macOS:**
           \`\`\`
-          open vnc://$IP:5900
+          $VNC_URL
           \`\`\`
           
-          **Windows (RealVNC / MS RDP):**
-          \`\`\`
-          $IP:5900
-          \`\`\`
+          ## 🔑 Password
+          \`${{ inputs.vnc_password }}\`
           
-          **Linux:**
-          \`\`\`bash
-          remmina -c vnc://$IP:5900
-          \`\`\`
+          ## 📱 Works On
+          - 💻 Desktop (Chrome, Firefox, Safari, Edge)
+          - 📱 Mobile (iOS Safari, Android Chrome)
+          - 📟 Tablet
           
           ## ⏱️ Timeout
           ${{ inputs.timeout }} minutes
           
-          ## 📝 Info
-          - Started: $(date -u '+%Y-%m-%d %H:%M UTC')
+          ## 💡 Tips
+          - Wait 10-20 seconds after clicking for full load
+          - If prompt for password, enter: \`${{ inputs.vnc_password }}\`
+          - For better experience, use Chrome
+          - Press Ctrl+Alt+Shift for special keys
+          
+          ## 🎯 What's Ready
+          - ✅ macOS Sonoma 14
+          - ✅ Xcode (pre-installed)
+          - ✅ Terminal, Safari, Finder
+          - ✅ Full GUI access
+          
           EOF
       
-      # ═══ 4. Keep alive ═══
+      # ═══ 6. Keep alive ═══
       - name: ⏳ Keep session alive
         run: |
-          IP=$(tailscale ip -4)
           for i in $(seq 1 ${{ inputs.timeout }}); do
-            echo "[$i/${{ inputs.timeout }}] $(date '+%H:%M:%S') - IP: $IP"
+            # چک سلامت tunnel هر ۱۰ دقیقه
+            if [ $((i % 10)) -eq 0 ]; then
+              if ! curl -s http://localhost:6080/vnc.html | grep -q "noVNC"; then
+                echo "⚠️ websockify died, restarting..."
+                nohup websockify --web=/tmp/novnc 6080 localhost:5900 \
+                  > /tmp/websockify.log 2>&1 &
+                sleep 5
+              fi
+            fi
+            
+            echo "[$i/${{ inputs.timeout }}] $(date '+%H:%M:%S')"
             sleep 60
           done
       
-      # ═══ 5. Cleanup ═══
+      # ═══ 7. Cleanup ═══
       - name: 🧹 Cleanup
         if: always()
         run: |
+          pkill cloudflared 2>/dev/null || true
+          pkill websockify 2>/dev/null || true
+          pkill python3 2>/dev/null || true
           echo "✅ Done"
