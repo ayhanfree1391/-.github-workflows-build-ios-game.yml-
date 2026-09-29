@@ -1,14 +1,14 @@
-name: 🖥️ VNC Only Session
+name: 🖥️ macOS VNC Session
 
 on:
   workflow_dispatch:
     inputs:
       timeout:
-        description: 'مدت (دقیقه) - حداکثر ۳۵۰'
+        description: 'Session timeout (minutes)'
         required: true
         default: '60'
       vnc_password:
-        description: 'رمز VNC (۱ تا ۸ کاراکتر)'
+        description: 'VNC password (max 8 chars)'
         required: true
         default: 'MacVNC12'
 
@@ -18,104 +18,132 @@ jobs:
     timeout-minutes: 360
     
     steps:
-      # 1️⃣ فعال‌سازی VNC
-      - name: 🖥️ Enable Screen Sharing
+      - name: 🔐 Verify secrets
+        env:
+          NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
+        run: |
+          if [ -z "$NGROK_AUTHTOKEN" ]; then
+            echo "❌ NGROK_AUTHTOKEN not set!"
+            exit 1
+          fi
+          echo "✅ Token OK (length: ${#NGROK_AUTHTOKEN})"
+      
+      - name: 🖥️ Enable VNC
         run: |
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on \
             -configure -allowAccessFor -allUsers \
-            -restart -agent -privs -all
+            -restart -agent -privs -all 2>&1 || true
           
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -configure -clientopts \
             -setvnclegacy -vnclegacy yes \
             -setvncpw -vncpw "${{ inputs.vnc_password }}" \
-            -restart -agent
+            -restart -agent 2>&1 || true
           
-          sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate off
+          sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate off 2>&1 || true
+          
+          sleep 2
           echo "✅ VNC enabled"
       
-      # 2️⃣ نصب ngrok
       - name: 📦 Install ngrok
         run: |
-          curl -sL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-darwin-amd64.zip -o /tmp/ngrok.zip
-          unzip -o /tmp/ngrok.zip -d /tmp
+          curl -sSL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-darwin-amd64.zip -o /tmp/ngrok.zip
+          unzip -o -q /tmp/ngrok.zip -d /tmp
           sudo mv /tmp/ngrok /usr/local/bin/
           sudo chmod +x /usr/local/bin/ngrok
           ngrok version
       
-      # 3️⃣ تنظیم توکن
       - name: 🔐 Configure ngrok
         env:
           NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
         run: |
-          ngrok config add-authtoken $NGROK_AUTHTOKEN
-      
-      # 4️⃣ شروع تونل
-      - name: 🌐 Start ngrok
-        run: |
-          ngrok tcp 5900 --log=stdout > /tmp/ngrok.log 2>&1 &
+          rm -rf ~/.config/ngrok ~/Library/Application\ Support/ngrok 2>/dev/null || true
+          mkdir -p ~/.config/ngrok
           
-          for i in {1..30}; do
+          cat > ~/.config/ngrok/ngrok.yml << EOF
+          version: "2"
+          authtoken: ${NGROK_AUTHTOKEN}
+          EOF
+          
+          echo "✅ Config written"
+      
+      - name: 🌐 Start ngrok tunnel
+        id: ngrok
+        run: |
+          echo "=== Starting ngrok ==="
+          nohup ngrok tcp 5900 --log=/tmp/ngrok.log > /dev/null 2>&1 &
+          echo $! > /tmp/ngrok.pid
+          
+          for i in $(seq 1 30); do
+            sleep 1
             if curl -s http://localhost:4040/api/tunnels 2>/dev/null | grep -q "tcp://"; then
+              echo "✅ ngrok ready in ${i}s"
               break
             fi
-            sleep 2
+            if [ $i -eq 30 ]; then
+              echo "❌ ngrok failed"
+              cat /tmp/ngrok.log
+              exit 1
+            fi
           done
           
           TUNNEL=$(curl -s http://localhost:4040/api/tunnels)
-          URL=$(echo "$TUNNEL" | jq -r '.tunnels[0].public_url')
-          HOST_PORT=$(echo "$URL" | sed 's|tcp://||')
+          PUBLIC_URL=$(echo "$TUNNEL" | jq -r '.tunnels[0].public_url')
+          HOST_PORT=$(echo "$PUBLIC_URL" | sed 's|tcp://||')
           HOST=$(echo "$HOST_PORT" | cut -d: -f1)
           PORT=$(echo "$HOST_PORT" | cut -d: -f2)
           
-          echo "══════════════════════════════════════════"
-          echo "🌐 HOST: $HOST"
-          echo "🔌 PORT: $PORT"
-          echo "🔑 PASS: ${{ inputs.vnc_password }}"
-          echo "══════════════════════════════════════════"
+          echo "host=$HOST" >> $GITHUB_OUTPUT
+          echo "port=$PORT" >> $GITHUB_OUTPUT
+          
+          echo "═══════════════════════════════════"
+          echo "🎯 VNC READY"
+          echo "🌐 Host: $HOST"
+          echo "🔌 Port: $PORT"
+          echo "🔑 Pass: ${{ inputs.vnc_password }}"
+          echo "═══════════════════════════════════"
           
           cat >> $GITHUB_STEP_SUMMARY << EOF
-          # 🖥️ VNC Ready
+          # 🖥️ macOS VNC Ready
           
           | | |
           |---|---|
-          | 🌐 Host | \`$HOST\` |
-          | 🔌 Port | \`$PORT\` |
-          | 🔑 Pass | \`${{ inputs.vnc_password }}\` |
+          | 🌐 **Host** | \`$HOST\` |
+          | 🔌 **Port** | \`$PORT\` |
+          | 🔑 **Password** | \`${{ inputs.vnc_password }}\` |
           
-          ## Connect
+          ## 📱 Connect
+          
+          **macOS:**
           \`\`\`
           open vnc://$HOST:$PORT
           \`\`\`
           
-          ## Info
-          - Xcode: pre-installed ✅
-          - Timeout: ${{ inputs.timeout }} min
+          **Windows / Linux / iOS:**
+          - RealVNC Viewer → \`$HOST:$PORT\`
+          
+          ## ⏱️ Info
+          - Timeout: ${{ inputs.timeout }} minutes
+          - Started: $(date -u '+%Y-%m-%d %H:%M UTC')
           EOF
       
-      # 5️⃣ زنده نگه‌داشتن
-      - name: ⏳ Keep alive
+      - name: ⏳ Keep session alive
         run: |
           for i in $(seq 1 ${{ inputs.timeout }}); do
-            # چک ngrok هر ۵ دقیقه
             if [ $((i % 5)) -eq 0 ]; then
               if ! curl -s http://localhost:4040/api/tunnels 2>/dev/null | grep -q "tcp://"; then
-                echo "⚠️ ngrok died, restarting..."
-                pkill ngrok || true
-                sleep 3
-                ngrok tcp 5900 --log=stdout > /tmp/ngrok.log 2>&1 &
+                echo "⚠️ ngrok restarting..."
+                nohup ngrok tcp 5900 --log=/tmp/ngrok.log > /dev/null 2>&1 &
                 sleep 10
-                NEW=$(curl -s http://localhost:4040/api/tunnels | jq -r '.tunnels[0].public_url')
-                echo "🔄 New URL: $NEW"
               fi
             fi
-            
             echo "[$i/${{ inputs.timeout }}] $(date '+%H:%M:%S')"
             sleep 60
           done
       
-      # 6️⃣ Cleanup
       - name: 🧹 Cleanup
         if: always()
-        run: pkill ngrok || true
+        run: |
+          pkill ngrok 2>/dev/null || true
+          echo "✅ Done"
