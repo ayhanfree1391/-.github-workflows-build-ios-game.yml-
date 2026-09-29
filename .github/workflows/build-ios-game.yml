@@ -18,7 +18,8 @@ jobs:
     timeout-minutes: 360
     
     steps:
-      - name: 🔐 Verify secrets
+      # ═══ 1. Verify Secret ═══
+      - name: 🔐 Verify secret
         env:
           NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
         run: |
@@ -28,6 +29,7 @@ jobs:
           fi
           echo "✅ Token OK (length: ${#NGROK_AUTHTOKEN})"
       
+      # ═══ 2. Enable VNC ═══
       - name: 🖥️ Enable VNC
         run: |
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
@@ -46,6 +48,7 @@ jobs:
           sleep 2
           echo "✅ VNC enabled"
       
+      # ═══ 3. Install ngrok ═══
       - name: 📦 Install ngrok
         run: |
           curl -sSL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-darwin-amd64.zip -o /tmp/ngrok.zip
@@ -54,20 +57,22 @@ jobs:
           sudo chmod +x /usr/local/bin/ngrok
           ngrok version
       
+      # ═══ 4. Configure ngrok (FIXED) ═══
       - name: 🔐 Configure ngrok
         env:
           NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
         run: |
-          rm -rf ~/.config/ngrok ~/Library/Application\ Support/ngrok 2>/dev/null || true
-          mkdir -p ~/.config/ngrok
+          # روش رسمی — خود ngrok مسیر درست رو می‌سازه
+          ngrok config add-authtoken "$NGROK_AUTHTOKEN"
           
-          cat > ~/.config/ngrok/ngrok.yml << EOF
-          version: "2"
-          authtoken: ${NGROK_AUTHTOKEN}
-          EOF
+          echo "═══════════════════════════════"
+          echo "✅ Authtoken configured"
+          echo "═══════════════════════════════"
           
-          echo "✅ Config written"
+          # نمایش مسیر config
+          find ~/Library -name "ngrok.yml" 2>/dev/null | head -3
       
+      # ═══ 5. Start ngrok ═══
       - name: 🌐 Start ngrok tunnel
         id: ngrok
         run: |
@@ -83,7 +88,9 @@ jobs:
             fi
             if [ $i -eq 30 ]; then
               echo "❌ ngrok failed"
+              echo "═══════════════════════════════"
               cat /tmp/ngrok.log
+              echo "═══════════════════════════════"
               exit 1
             fi
           done
@@ -97,12 +104,12 @@ jobs:
           echo "host=$HOST" >> $GITHUB_OUTPUT
           echo "port=$PORT" >> $GITHUB_OUTPUT
           
-          echo "═══════════════════════════════════"
+          echo "═══════════════════════════════"
           echo "🎯 VNC READY"
           echo "🌐 Host: $HOST"
           echo "🔌 Port: $PORT"
           echo "🔑 Pass: ${{ inputs.vnc_password }}"
-          echo "═══════════════════════════════════"
+          echo "═══════════════════════════════"
           
           cat >> $GITHUB_STEP_SUMMARY << EOF
           # 🖥️ macOS VNC Ready
@@ -115,19 +122,12 @@ jobs:
           
           ## 📱 Connect
           
-          **macOS:**
           \`\`\`
           open vnc://$HOST:$PORT
           \`\`\`
-          
-          **Windows / Linux / iOS:**
-          - RealVNC Viewer → \`$HOST:$PORT\`
-          
-          ## ⏱️ Info
-          - Timeout: ${{ inputs.timeout }} minutes
-          - Started: $(date -u '+%Y-%m-%d %H:%M UTC')
           EOF
       
+      # ═══ 6. Keep alive ═══
       - name: ⏳ Keep session alive
         run: |
           for i in $(seq 1 ${{ inputs.timeout }}); do
@@ -142,6 +142,7 @@ jobs:
             sleep 60
           done
       
+      # ═══ 7. Cleanup ═══
       - name: 🧹 Cleanup
         if: always()
         run: |
