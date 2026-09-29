@@ -1,4 +1,4 @@
-name: 🖥️ macOS VNC via Browser
+name: 🖥️ macOS VNC (Auto-Healing)
 
 on:
   workflow_dispatch:
@@ -36,114 +36,69 @@ jobs:
           sleep 2
           echo "✅ VNC enabled"
       
-      # ═══ 2. Install noVNC + websockify (venv) ═══
+      # ═══ 2. Install noVNC + websockify ═══
       - name: 📦 Install noVNC
         run: |
-          echo "=== Installing noVNC ==="
-          
-          # noVNC
           git clone --depth=1 https://github.com/novnc/noVNC.git /tmp/novnc
-          echo "✅ noVNC cloned"
-          
-          # websockify در virtualenv
           python3 -m venv /tmp/wsvenv
           /tmp/wsvenv/bin/pip install --quiet websockify
-          
-          echo "✅ websockify installed"
-          /tmp/wsvenv/bin/websockify --help 2>&1 | head -3
+          echo "✅ noVNC + websockify installed"
       
-      # ═══ 3. Start websockify ═══
-      - name: 🌐 Start websockify
-        run: |
-          echo "=== Starting websockify proxy ==="
-          
-          nohup /tmp/wsvenv/bin/websockify --web=/tmp/novnc 6080 localhost:5900 \
-            > /tmp/websockify.log 2>&1 &
-          echo $! > /tmp/websockify.pid
-          
-          sleep 5
-          
-          # چک
-          for i in {1..10}; do
-            if curl -s http://localhost:6080/vnc.html 2>/dev/null | grep -q "noVNC"; then
-              echo "✅ websockify running on port 6080"
-              break
-            fi
-            sleep 2
-          done
-          
-          if ! curl -s http://localhost:6080/vnc.html | grep -q "noVNC"; then
-            echo "❌ websockify failed"
-            cat /tmp/websockify.log
-            exit 1
-          fi
-      
-      # ═══ 4. Install cloudflared ═══
+      # ═══ 3. Install cloudflared ═══
       - name: 📦 Install cloudflared
         run: |
-          echo "=== Installing cloudflared ==="
-          
-          # دانلود binary ARM64 (چون runner ARM64 هست)
           curl -L -o /tmp/cloudflared.tgz \
             https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-arm64.tgz
-          
           tar -xzf /tmp/cloudflared.tgz -C /tmp
           sudo mv /tmp/cloudflared /usr/local/bin/
           sudo chmod +x /usr/local/bin/cloudflared
-          
           cloudflared --version
-          echo "✅ cloudflared installed"
       
-      # ═══ 5. Start Cloudflare Tunnel ═══
-      - name: 🌐 Start Cloudflare Tunnel
-        id: tunnel
+      # ═══ 4. Start services (with watchdog) ═══
+      - name: 🌐 Start services
         run: |
-          echo "=== Starting Cloudflare tunnel ==="
+          echo "=== Starting websockify ==="
+          nohup /tmp/wsvenv/bin/websockify --web=/tmp/novnc 6080 localhost:5900 \
+            > /tmp/websockify.log 2>&1 &
+          echo $! > /tmp/ws.pid
           
+          sleep 5
+          
+          echo "=== Starting cloudflared ==="
           nohup cloudflared tunnel --url http://localhost:6080 \
             --no-autoupdate \
             > /tmp/cloudflared.log 2>&1 &
           echo $! > /tmp/cf.pid
           
+          sleep 10
+          
+          # منتظر URL
           URL=""
-          for i in $(seq 1 40); do
+          for i in $(seq 1 30); do
             sleep 2
             URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/cloudflared.log | head -1)
-            if [ -n "$URL" ]; then
-              echo "✅ Tunnel ready: $URL"
-              break
-            fi
-            echo "⏳ Waiting... ($i/40)"
+            [ -n "$URL" ] && break
           done
           
           if [ -z "$URL" ]; then
-            echo "❌ Failed to get tunnel URL"
-            echo "═══════════════════════════════"
+            echo "❌ No URL"
             cat /tmp/cloudflared.log
-            echo "═══════════════════════════════"
             exit 1
           fi
           
           echo "url=$URL" >> $GITHUB_OUTPUT
-          
           VNC_URL="${URL}/vnc.html?autoconnect=true&password=${{ inputs.vnc_password }}&resize=scale"
           
-          echo ""
           echo "═══════════════════════════════════════════════════"
-          echo "🎯 VNC READY"
-          echo "═══════════════════════════════════════════════════"
-          echo "🌐 URL:"
+          echo "🎯 VNC URL:"
           echo "$VNC_URL"
-          echo ""
-          echo "🔑 Password: ${{ inputs.vnc_password }}"
           echo "═══════════════════════════════════════════════════"
           
           cat >> $GITHUB_STEP_SUMMARY << EOF
           # 🖥️ macOS VNC Ready
           
-          ## 🎉 **[👉 Click Here to Connect]($VNC_URL)**
+          ## 🎉 **[👉 Click to Connect]($VNC_URL)**
           
-          Or copy this URL:
           \`\`\`
           $VNC_URL
           \`\`\`
@@ -151,23 +106,65 @@ jobs:
           ## 🔑 Password
           \`${{ inputs.vnc_password }}\`
           
-          ## 📱 Works On
-          - 💻 Desktop (Chrome, Firefox, Safari)
-          - 📱 Mobile (iOS Safari, Android Chrome)
-          
           ## ⏱️ Timeout
           ${{ inputs.timeout }} minutes
+          
+          ## ⚠️ اگه قطع شد
+          اگه لینک کار نکرد، این صفحه رو Refresh کن و لینک جدید بردار!
           EOF
       
-      # ═══ 6. Keep alive ═══
-      - name: ⏳ Keep session alive
+      # ═══ 5. Watchdog + Keep alive ═══
+      - name: 🐕 Watchdog (auto-restart)
         run: |
-          for i in $(seq 1 ${{ inputs.timeout }}); do
-            echo "[$i/${{ inputs.timeout }}] $(date '+%H:%M:%S')"
+          MINUTES=${{ inputs.timeout }}
+          
+          for i in $(seq 1 $MINUTES); do
+            echo "───────────────────────────────"
+            echo "[$i/$MINUTES] $(date '+%H:%M:%S')"
+            
+            # چک websockify
+            if ! curl -s http://localhost:6080/vnc.html 2>/dev/null | grep -q "noVNC"; then
+              echo "⚠️ websockify died, restarting..."
+              pkill -f websockify 2>/dev/null || true
+              sleep 2
+              nohup /tmp/wsvenv/bin/websockify --web=/tmp/novnc 6080 localhost:5900 \
+                > /tmp/websockify.log 2>&1 &
+              sleep 3
+              echo "✅ websockify restarted"
+            else
+              echo "✅ websockify OK"
+            fi
+            
+            # چک cloudflared هر ۵ دقیقه
+            if [ $((i % 5)) -eq 0 ]; then
+              if ! kill -0 $(cat /tmp/cf.pid) 2>/dev/null; then
+                echo "⚠️ cloudflared died, restarting..."
+                sleep 2
+                nohup cloudflared tunnel --url http://localhost:6080 \
+                  --no-autoupdate \
+                  > /tmp/cloudflared.log 2>&1 &
+                echo $! > /tmp/cf.pid
+                sleep 10
+                
+                # URL جدید
+                NEW_URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/cloudflared.log | tail -1)
+                echo "🔄 New URL: $NEW_URL"
+                
+                # به summary اضافه کن
+                cat >> $GITHUB_STEP_SUMMARY << EOF
+                
+                ## 🔄 URL Updated at $(date '+%H:%M:%S')
+                **[👉 New Link](https://$NEW_URL/vnc.html?autoconnect=true&password=${{ inputs.vnc_password }})**
+                EOF
+              else
+                echo "✅ cloudflared OK"
+              fi
+            fi
+            
             sleep 60
           done
       
-      # ═══ 7. Cleanup ═══
+      # ═══ 6. Cleanup ═══
       - name: 🧹 Cleanup
         if: always()
         run: |
