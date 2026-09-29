@@ -1,0 +1,121 @@
+name: 🖥️ VNC Only Session
+
+on:
+  workflow_dispatch:
+    inputs:
+      timeout:
+        description: 'مدت (دقیقه) - حداکثر ۳۵۰'
+        required: true
+        default: '60'
+      vnc_password:
+        description: 'رمز VNC (۱ تا ۸ کاراکتر)'
+        required: true
+        default: 'MacVNC12'
+
+jobs:
+  vnc:
+    runs-on: macos-14
+    timeout-minutes: 360
+    
+    steps:
+      # 1️⃣ فعال‌سازی VNC
+      - name: 🖥️ Enable Screen Sharing
+        run: |
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate -configure -access -on \
+            -configure -allowAccessFor -allUsers \
+            -restart -agent -privs -all
+          
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -configure -clientopts \
+            -setvnclegacy -vnclegacy yes \
+            -setvncpw -vncpw "${{ inputs.vnc_password }}" \
+            -restart -agent
+          
+          sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate off
+          echo "✅ VNC enabled"
+      
+      # 2️⃣ نصب ngrok
+      - name: 📦 Install ngrok
+        run: |
+          curl -sL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-darwin-amd64.zip -o /tmp/ngrok.zip
+          unzip -o /tmp/ngrok.zip -d /tmp
+          sudo mv /tmp/ngrok /usr/local/bin/
+          sudo chmod +x /usr/local/bin/ngrok
+          ngrok version
+      
+      # 3️⃣ تنظیم توکن
+      - name: 🔐 Configure ngrok
+        env:
+          NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
+        run: |
+          ngrok config add-authtoken $NGROK_AUTHTOKEN
+      
+      # 4️⃣ شروع تونل
+      - name: 🌐 Start ngrok
+        run: |
+          ngrok tcp 5900 --log=stdout > /tmp/ngrok.log 2>&1 &
+          
+          for i in {1..30}; do
+            if curl -s http://localhost:4040/api/tunnels 2>/dev/null | grep -q "tcp://"; then
+              break
+            fi
+            sleep 2
+          done
+          
+          TUNNEL=$(curl -s http://localhost:4040/api/tunnels)
+          URL=$(echo "$TUNNEL" | jq -r '.tunnels[0].public_url')
+          HOST_PORT=$(echo "$URL" | sed 's|tcp://||')
+          HOST=$(echo "$HOST_PORT" | cut -d: -f1)
+          PORT=$(echo "$HOST_PORT" | cut -d: -f2)
+          
+          echo "══════════════════════════════════════════"
+          echo "🌐 HOST: $HOST"
+          echo "🔌 PORT: $PORT"
+          echo "🔑 PASS: ${{ inputs.vnc_password }}"
+          echo "══════════════════════════════════════════"
+          
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          # 🖥️ VNC Ready
+          
+          | | |
+          |---|---|
+          | 🌐 Host | \`$HOST\` |
+          | 🔌 Port | \`$PORT\` |
+          | 🔑 Pass | \`${{ inputs.vnc_password }}\` |
+          
+          ## Connect
+          \`\`\`
+          open vnc://$HOST:$PORT
+          \`\`\`
+          
+          ## Info
+          - Xcode: pre-installed ✅
+          - Timeout: ${{ inputs.timeout }} min
+          EOF
+      
+      # 5️⃣ زنده نگه‌داشتن
+      - name: ⏳ Keep alive
+        run: |
+          for i in $(seq 1 ${{ inputs.timeout }}); do
+            # چک ngrok هر ۵ دقیقه
+            if [ $((i % 5)) -eq 0 ]; then
+              if ! curl -s http://localhost:4040/api/tunnels 2>/dev/null | grep -q "tcp://"; then
+                echo "⚠️ ngrok died, restarting..."
+                pkill ngrok || true
+                sleep 3
+                ngrok tcp 5900 --log=stdout > /tmp/ngrok.log 2>&1 &
+                sleep 10
+                NEW=$(curl -s http://localhost:4040/api/tunnels | jq -r '.tunnels[0].public_url')
+                echo "🔄 New URL: $NEW"
+              fi
+            fi
+            
+            echo "[$i/${{ inputs.timeout }}] $(date '+%H:%M:%S')"
+            sleep 60
+          done
+      
+      # 6️⃣ Cleanup
+      - name: 🧹 Cleanup
+        if: always()
+        run: pkill ngrok || true
